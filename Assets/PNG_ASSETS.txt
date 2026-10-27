@@ -1,0 +1,2 @@
+GUI assets in this project are PNG files only.
+No SVG files are used.
