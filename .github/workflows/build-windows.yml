@@ -1,0 +1,116 @@
+name: Build LA-2A Classic (Windows)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build VST3 and Standalone
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version
+          git --version
+          Get-ChildItem Env: | Where-Object { $_.Name -match '^(VS|VisualStudio)' } | Format-Table -AutoSize
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 2>&1 | Tee-Object -FilePath configure.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "---- CMake configure diagnostics ----"
+            Get-Content configure.log -Tail 160
+            exit $LASTEXITCODE
+          }
+
+      - name: Build VST3
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target LA2AClassic_VST3 --parallel 2 -- /verbosity:minimal 2>&1 | Tee-Object -FilePath build-vst3.log
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) {
+            Write-Host "---- Compiler/linker error lines ----"
+            Select-String -Path build-vst3.log -Pattern 'error C[0-9]+|fatal error|error LNK[0-9]+|FAILED:|undefined reference|Error [0-9]+' -Context 3,3
+            Write-Host "---- Last 180 lines of build log ----"
+            Get-Content build-vst3.log -Tail 180
+            exit $buildExit
+          }
+
+      - name: Build Standalone
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target LA2AClassic_Standalone --parallel 2 -- /verbosity:minimal 2>&1 | Tee-Object -FilePath build-standalone.log
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) {
+            Write-Host "---- Compiler/linker error lines ----"
+            Select-String -Path build-standalone.log -Pattern 'error C[0-9]+|fatal error|error LNK[0-9]+|FAILED:|undefined reference|Error [0-9]+' -Context 3,3
+            Write-Host "---- Last 180 lines of build log ----"
+            Get-Content build-standalone.log -Tail 180
+            exit $buildExit
+          }
+
+      - name: Verify VST3 output exists
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path "build" -Recurse -Directory -Filter "LA-2A Classic.vst3" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $vst3) {
+            Write-Error "Build reported success but LA-2A Classic.vst3 was not found."
+            Get-ChildItem -Path "build" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            exit 1
+          }
+          $module = Get-ChildItem -Path $vst3.FullName -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -eq ".vst3" -or $_.Extension -eq ".dll" } |
+            Select-Object -First 1
+          if (-not $module) {
+            Write-Error "VST3 bundle exists but no plugin binary was found inside it."
+            exit 1
+          }
+          Write-Host "Verified VST3 bundle: $($vst3.FullName)"
+          Write-Host "Verified plugin binary: $($module.FullName)"
+
+      - name: Upload VST3 artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LA-2A-Classic-VST3-Windows-x64
+          path: build/**/LA-2A Classic.vst3/**
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
+
+      - name: Upload Standalone artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LA-2A-Classic-Standalone-Windows-x64
+          path: build/**/LA-2A Classic.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build logs and CMake diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LA-2A-build-diagnostics
+          path: |
+            configure.log
+            build-vst3.log
+            build-standalone.log
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: warn
+          retention-days: 7
